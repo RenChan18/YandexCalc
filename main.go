@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"unicode"
 )
 
@@ -112,28 +113,28 @@ func toPostfix(expression string) string {
 }
 func Calc(expression string) (float64, error) {
 	var numbers []float64
-	var sNum string
 	postfix := toPostfix(expression)
 
-	for _, token := range postfix {
-		if unicode.IsDigit(token) {
-			sNum += string(token)
-		} else if IsOperator(token) {
-			if sNum != "" {
-				f, err := strconv.ParseFloat(string(token), 64)
-				if err != nil {
-
-				} else {
-					numbers = numbers.append(f)
-					sNum = ""
-				}
+	for _, token := range strings.Fields(postfix) {
+		if unicode.IsDigit(rune(token[0])) {
+			f, err := strconv.ParseFloat(string(token), 64)
+			if err != nil {
+				return 0, err
 			}
+			numbers = append(numbers, f)
+		} else if IsOperator(rune(token[0])) {
 			var second, first float64
 			numbers, second = pops(numbers)
 			numbers, first = pops(numbers)
-
+			result, err := compute(first, second, Operator(token[0]))
+			if err != nil {
+				return 0, err
+			}
+			numbers = append(numbers, result)
 		}
 	}
-
-	return result, nil
+	if len(numbers) != 1 {
+		return 0, errors.New("Invalid Expr")
+	}
+	return numbers[0], nil
 }
