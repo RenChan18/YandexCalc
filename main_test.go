@@ -1,42 +1,48 @@
 package main
 
-import (
-	"errors"
-	"testing"
-)
-
-type Test struct {
-	in      string
-	result  float64
-	exp_err error
-}
-
-var tests = []Test{
-	{"2+3", 5.0, nil},
-	{"2/0", 0.0, errors.New("division by zero")},
-	{"2*3", 6.0, nil},
-	{"3*0", 0.0, nil},
-	{"3/2", 1.5, nil},
-    {"1+1+1", 3, nil},
-    {"2+3*0", 2, nil},
-    {"20+1", 21, nil},
-}
+import "testing"
 
 func TestCalc(t *testing.T) {
-	for i, test := range tests {
-		got, err := Calc(test.in)
+	testCasesSuccess := []struct {
+		name           string
+		expression     string
+		expectedResult float64
+	}{
+		{"simple", "1+1", 2},
+		{"priority", "(2+2)*2", 8},
+		{"mixed", "2+2*2", 6},
+		{"division", "1/2", 0.5},
+	}
 
-		// Сравниваем значение результата
-		if got != test.result {
-			t.Errorf("#%d: got %v want %v", i, got, test.result)
-		}
+	for _, testCase := range testCasesSuccess {
+		t.Run(testCase.name, func(t *testing.T) {
+			val, err := Calc(testCase.expression)
+			if err != nil {
+				t.Fatalf("successful case %s returns error: %v", testCase.expression, err)
+			}
+			if val != testCase.expectedResult {
+				t.Fatalf("expected %f, got %f", testCase.expectedResult, val)
+			}
+		})
+	}
 
-		// Сравниваем ошибки
-		if (err != nil && test.exp_err == nil) || (err == nil && test.exp_err != nil) {
-			t.Errorf("#%d: got %v want %v", i, err, test.exp_err)
-		} else if err != nil && test.exp_err != nil && err.Error() != test.exp_err.Error() {
-			t.Errorf("#%d: got %v want %v", i, err, test.exp_err)
-		}
+	testCasesFail := []struct {
+		name        string
+		expression  string
+		expectedErr string
+	}{
+		{"invalid operator", "1+1*", "not enough operands"},
+		{"mismatched parenthesis", "(1+2", "mismatched parentheses"},
+		{"division by zero", "1/0", "division by zero"},
+	}
+
+	for _, testCase := range testCasesFail {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := Calc(testCase.expression)
+			if err == nil || err.Error() != testCase.expectedErr {
+				t.Fatalf("expected error %s, got %v", testCase.expectedErr, err)
+			}
+		})
 	}
 }
 
