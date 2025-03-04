@@ -6,25 +6,43 @@
 ```go
 .
 ├── cmd
-│   └── calc_service
-│       └── main.go
+│   ├── agent
+│   │   └── main.go
+│   ├── calc_service
+│   │   └── main.go
+│   └── orchestrator
+│       └── main.go
 ├── go.mod
+├── go.sum
 ├── internal
-│   └── calculator
-│       └── calculator.go
+│   ├── calculator
+│   │   └── calculator.go
+│   └── orchestration
+│       ├── expression.go
+│       ├── hander.go
+│       └── task_queue.go
 ├── README.md
 └── tests
     └── calculator_test.go
 ```
-- `cmd/calc_service/main.go`: Основной файл, запускающий веб-сервис.
-- `internal/calculator/calculator.go`: Логика для обработки арифметических выражений.
+- `cmd/orchestrator/main.go`: Запуск сервера оркестратора (принимает выражения, разбивает их на задачи, хранит их состояние и предоставляет API для клиентов и агентов).  
+
+- `cmd/agent/main.go`: Запуск демона агента (постоянно опрашивает сервер для получения задач, выполняет вычисления (с использованием уже существующей логики, где это применимо) и отправляет результат обратно серверу).
+
+- `interlan/orchestration/expression.go`: Модели выражений и задач.
+
+- `internal/orchestration/handler.go`: HTTP-обработчики для оркестратора.
+
+- `internal/orchestration/task_queue.go`: Очередь задач.
+
 - `tests/calculator_test.go`: Тесты для калькулятора.
 
 
 ## Запуск проекта
 
 ```bash
-go run ./cmd/calc_service/...
+go run ./cmd/agent/main.go
+go run ./cmd/orchestrator/main.go
 ```
 
 ## API
