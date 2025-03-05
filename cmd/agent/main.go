@@ -1,97 +1,111 @@
 package main
 
 import (
-    "bytes"
-    "encoding/json"
-    "log"
-    "net/http"
-    "os"
-    "strconv"
-    "time"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"time"
+
+	"calc_service/internal/calculator"
 )
 
-func main() {
-    power := os.Getenv("COMPUTING_POWER")
-    computingPower, err := strconv.Atoi(power)
-    if err != nil || computingPower <= 0 {
-        computingPower = 2 // значение по умолчанию
-    }
+type Task struct {
+	ID            int    `json:"id"`
+	Expression    string `json:"expression,omitempty"`
+	Operation     string `json:"operation"`
+	OperationTime int    `json:"operation_time"`
+}
 
-    for i := 0; i < computingPower; i++ {
-        go worker(i)
-    }
+func getTask() (*Task, error) {
+	resp, err := http.Get("http://localhost:8080/internal/task")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-    // Бесконечный цикл, чтобы агент не завершался
-    select {}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New("unexpected status: " + resp.Status)
+	}
+	var data struct {
+		Task *Task `json:"task"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	return data.Task, nil
+}
+
+func postTaskResult(taskID int, result float64) error {
+	data := map[string]interface{}{
+		"id":     taskID,
+		"result": result,
+	}
+	body, _ := json.Marshal(data)
+	resp, err := http.Post("http://localhost:8080/internal/task", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("failed to post result, status: " + resp.Status)
+	}
+	return nil
 }
 
 func worker(id int) {
-    log.Printf("Worker %d started", id)
-    for {
-        // Запрос задачи
-        resp, err := http.Get("http://localhost:8080/internal/task")
-        if err != nil {
-            log.Printf("Worker %d: error fetching task: %v", id, err)
-            time.Sleep(2 * time.Second)
-            continue
-        }
-        if resp.StatusCode == http.StatusNotFound {
-            // Нет задач, ждём некоторое время
-            time.Sleep(1 * time.Second)
-            continue
-        }
-        var taskResp struct {
-            Task struct {
-                ID            int    `json:"id"`
-                Arg1          string `json:"arg1"`
-                Arg2          string `json:"arg2"`
-                Operation     string `json:"operation"`
-                OperationTime int    `json:"operation_time"`
-            } `json:"task"`
-        }
-        if err := json.NewDecoder(resp.Body).Decode(&taskResp); err != nil {
-            log.Printf("Worker %d: error decoding task: %v", id, err)
-            resp.Body.Close()
-            continue
-        }
-        resp.Body.Close()
-
-        // Имитация задержки выполнения
-        time.Sleep(time.Duration(taskResp.Task.OperationTime) * time.Millisecond)
-
-        // Простейшая логика вычисления (можно использовать internal/calculator)
-        result := performOperation(taskResp.Task.Arg1, taskResp.Task.Arg2, taskResp.Task.Operation)
-
-        // Отправка результата
-        submitTaskResult(taskResp.Task.ID, result)
-    }
+	log.Printf("Worker %d запущен", id)
+	for {
+		task, err := getTask()
+		if err != nil {
+			log.Printf("Worker %d: ошибка получения задания: %v", id, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if task == nil {
+			// Нет заданий — ждём
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		log.Printf("Worker %d: получено задание %d: %s", id, task.ID, task.Expression)
+		// Имитируем задержку выполнения
+		time.Sleep(time.Millisecond * time.Duration(task.OperationTime))
+		// Вычисляем результат
+		res, err := calculator.Calc(task.Expression)
+		if err != nil {
+			log.Printf("Worker %d: ошибка вычисления: %v", id, err)
+			continue
+		}
+		// Отправляем результат обратно
+		if err = postTaskResult(task.ID, res); err != nil {
+			log.Printf("Worker %d: ошибка отправки результата: %v", id, err)
+			continue
+		}
+		log.Printf("Worker %d: задание %d выполнено, результат = %v", id, task.ID, res)
+	}
 }
 
-func performOperation(arg1, arg2, operation string) float64 {
-    // Здесь можно расширить логику или вызвать функцию из internal/calculator
-    // Пример для сложения и умножения:
-    var a, b float64
-    a, _ = strconv.ParseFloat(arg1, 64)
-    b, _ = strconv.ParseFloat(arg2, 64)
-    switch operation {
-    case "+":
-        return a + b
-    case "*":
-        return a * b
-    default:
-        return 0
-    }
+func main() {
+	powerStr := os.Getenv("COMPUTING_POWER")
+	if powerStr == "" {
+		powerStr = "2"
+	}
+	power, err := strconv.Atoi(powerStr)
+	if err != nil {
+		power = 2
+	}
+
+	for i := 0; i < power; i++ {
+		go worker(i + 1)
+	}
+
+	// Блокируем main, чтобы агент работал постоянно
+	select {}
 }
 
-func submitTaskResult(taskID int, result float64) {
-    reqBody, _ := json.Marshal(map[string]interface{}{
-        "id":     taskID,
-        "result": result,
-    })
-    resp, err := http.Post("http://localhost:8080/internal/task", "application/json", bytes.NewBuffer(reqBody))
-    if err != nil {
-        log.Printf("Error submitting result for task %d: %v", taskID, err)
-        return
-    }
-    resp.Body.Close()
-}

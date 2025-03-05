@@ -1,130 +1,220 @@
 package orchestration
 
 import (
-    "encoding/json"
-    "log"
-    "net/http"
-    "os"
-    "strconv"
-    "time"
+	"encoding/json"
+//	"errors"
+//	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
 
-    "github.com/google/uuid"
-    "calc_service/internal/calculator" // импорт старой логики вычислений
+	"calc_service/internal/calculator"
 )
+
+type Expression struct {
+	ID         int     `json:"id"`
+	Expression string  `json:"expression"`
+	Status     string  `json:"status"` // pending, processing, completed, error
+	Result     float64 `json:"result"`
+	Tasks      []*Task `json:"-"`
+}
+
+type Task struct {
+	ID            int     `json:"id"`
+	ExpressionID  int     `json:"-"`
+	Expression    string  `json:"expression,omitempty"`
+	Operation     string  `json:"operation"`
+	OperationTime int     `json:"operation_time"`
+	Result        float64 `json:"-"`
+	Executed      bool    `json:"-"`
+}
 
 var (
-    // Здесь можно хранить выражения в памяти для простоты примера.
-    expressions = make(map[string]*Expression)
-    // Очередь задач для агентов.
-    taskQueue = NewTaskQueue(100)
+	expressions = make(map[int]*Expression)
+	tasksQueue  = make([]*Task, 0)
+	exprMutex   sync.Mutex
+	taskMutex   sync.Mutex
+	nextExprID  = 1
+	nextTaskID  = 1
 )
 
-// AddExpressionHandler обрабатывает POST /api/v1/calculate.
-func AddExpressionHandler(w http.ResponseWriter, r *http.Request) {
-    var req struct {
-        Expression string `json:"expression"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Expression == "" {
-        http.Error(w, `{"error": "Invalid input"}`, http.StatusUnprocessableEntity)
-        return
-    }
-	// Используем функцию из пакета calculator для проверки выражения.
-	_, err := calculator.Calc(req.Expression)
-	if err != nil {
-	 http.Error(w, `{"error": "Expression is not valid"}`, http.StatusUnprocessableEntity)
-	 return
+// CalculateHandler обрабатывает POST /api/v1/calculate
+func CalculateHandler(w http.ResponseWriter, r *http.Request) {
+	type RequestBody struct {
+		Expression string `json:"expression"`
 	}
-	id := uuid.New().String()
-    exp := &Expression{
-        ID:        id,
-        Raw:       req.Expression,
-        Status:    StatusPending,
-        CreatedAt: time.Now(),
-    }
+	var reqBody RequestBody
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil || strings.TrimSpace(reqBody.Expression) == "" {
+		http.Error(w, "invalid data", http.StatusUnprocessableEntity)
+		return
+	}
 
-    // Пример разбиения выражения на задачи (псевдокод)
-    // Можно вызвать функцию из internal/calculator для парсинга
-    // Здесь для простоты предположим, что выражение "2*2+2" делится на 2 задачи:
-    // 1. Вычислить 2*2
-    // 2. Вычислить результат предыдущей операции + 2
-    if req.Expression == "2*2+2" {
-        task1 := Task{
-            ID:            1,
-            Arg1:          "2",
-            Arg2:          "2",
-            Operation:     "*",
-            OperationTime: getOperationTime("multiplication"),
-        }
-        task2 := Task{
-            ID:            2,
-            Arg1:          "4", // ожидаем результат task1
-            Arg2:          "2",
-            Operation:     "+",
-            OperationTime: getOperationTime("addition"),
-        }
-        exp.Tasks = []Task{task1, task2}
+	// Проверяем выражение с помощью calculator.Calc
+	if _, err := calculator.Calc(reqBody.Expression); err != nil {
+		http.Error(w, "invalid expression: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 
-        // Добавляем задачи в очередь
-        taskQueue.Enqueue(task1)
-        taskQueue.Enqueue(task2)
-    } else {
-        // Можно попытаться вычислить синхронно или вернуть ошибку.
-        http.Error(w, `{"error": "Expression format not supported"}`, http.StatusUnprocessableEntity)
-        return
-    }
+	// Создаём новую запись выражения
+	exprMutex.Lock()
+	exprID := nextExprID
+	nextExprID++
+	expr := &Expression{
+		ID:         exprID,
+		Expression: reqBody.Expression,
+		Status:     "pending",
+	}
+	expressions[exprID] = expr
+	exprMutex.Unlock()
 
-    expressions[id] = exp
+	// Определяем время операции по первому найденному оператору
+	var opTime int
+	var op string
+	if strings.Contains(reqBody.Expression, "+") {
+		op = "+"
+		opTime, _ = strconv.Atoi(os.Getenv("TIME_ADDITION_MS"))
+	} else if strings.Contains(reqBody.Expression, "-") {
+		op = "-"
+		opTime, _ = strconv.Atoi(os.Getenv("TIME_SUBTRACTION_MS"))
+	} else if strings.Contains(reqBody.Expression, "*") {
+		op = "*"
+		opTime, _ = strconv.Atoi(os.Getenv("TIME_MULTIPLICATIONS_MS"))
+	} else if strings.Contains(reqBody.Expression, "/") {
+		op = "/"
+		opTime, _ = strconv.Atoi(os.Getenv("TIME_DIVISIONS_MS"))
+	} else {
+		op = "calc"
+		opTime = 0
+	}
 
-    w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(map[string]string{"id": id})
+	// Создаём задачу – для простоты задание содержит всё выражение
+	taskMutex.Lock()
+	taskID := nextTaskID
+	nextTaskID++
+	task := &Task{
+		ID:            taskID,
+		ExpressionID:  exprID,
+		Expression:    reqBody.Expression,
+		Operation:     op,
+		OperationTime: opTime,
+	}
+	tasksQueue = append(tasksQueue, task)
+	taskMutex.Unlock()
+
+	// Привязываем задачу к выражению
+	exprMutex.Lock()
+	expr.Tasks = append(expr.Tasks, task)
+	expr.Status = "processing"
+	exprMutex.Unlock()
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]int{"id": exprID})
 }
 
-func getOperationTime(operation string) int {
-    // Читаем переменные окружения, задающие время выполнения.
-    var envKey string
-    switch operation {
-    case "addition":
-        envKey = "TIME_ADDITION_MS"
-    case "subtraction":
-        envKey = "TIME_SUBTRACTION_MS"
-    case "multiplication":
-        envKey = "TIME_MULTIPLICATIONS_MS"
-    case "division":
-        envKey = "TIME_DIVISIONS_MS"
-    default:
-        return 0
-    }
-    msStr := os.Getenv(envKey)
-    ms, err := strconv.Atoi(msStr)
-    if err != nil {
-        // Если переменная не установлена, возвращаем дефолтное значение, например, 50 мс.
-        return 50
-    }
-    return ms
+// GetExpressionsHandler обрабатывает GET /api/v1/expressions
+func GetExpressionsHandler(w http.ResponseWriter, r *http.Request) {
+	exprMutex.Lock()
+	defer exprMutex.Unlock()
+
+	exprs := make([]*Expression, 0, len(expressions))
+	for _, e := range expressions {
+		exprs = append(exprs, e)
+	}
+
+	resp := map[string]interface{}{
+		"expressions": exprs,
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
-// GetTaskHandler обрабатывает GET /internal/task для агентов.
+// GetExpressionByIDHandler обрабатывает GET /api/v1/expressions/{id}
+func GetExpressionByIDHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	idStr := parts[len(parts)-1]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusNotFound)
+		return
+	}
+
+	exprMutex.Lock()
+	expr, ok := expressions[id]
+	exprMutex.Unlock()
+	if !ok {
+		http.Error(w, "expression not found", http.StatusNotFound)
+		return
+	}
+
+	resp := map[string]*Expression{"expression": expr}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// GetTaskHandler обрабатывает GET /internal/task
 func GetTaskHandler(w http.ResponseWriter, r *http.Request) {
-    task, ok := taskQueue.Dequeue()
-    if !ok {
-        http.Error(w, `{"error": "No tasks available"}`, http.StatusNotFound)
-        return
-    }
-    json.NewEncoder(w).Encode(map[string]Task{"task": task})
+	taskMutex.Lock()
+	defer taskMutex.Unlock()
+	for _, t := range tasksQueue {
+		if !t.Executed {
+			resp := map[string]*Task{"task": t}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+	}
+	http.Error(w, "no task", http.StatusNotFound)
 }
 
-// SubmitTaskHandler обрабатывает POST /internal/task для принятия результата.
-func SubmitTaskHandler(w http.ResponseWriter, r *http.Request) {
-    var req struct {
-        ID     int     `json:"id"`
-        Result float64 `json:"result"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, `{"error": "Invalid input"}`, http.StatusUnprocessableEntity)
-        return
-    }
-    // Здесь необходимо найти задачу и обновить её статус, а затем – обновить состояние выражения.
-    // Для простоты примера просто логируем результат.
-    log.Printf("Task %d completed with result %f", req.ID, req.Result)
-    w.WriteHeader(http.StatusOK)
+// PostTaskResultHandler обрабатывает POST /internal/task
+func PostTaskResultHandler(w http.ResponseWriter, r *http.Request) {
+	type RequestBody struct {
+		ID     int     `json:"id"`
+		Result float64 `json:"result"`
+	}
+	var reqBody RequestBody
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "invalid data", http.StatusUnprocessableEntity)
+		return
+	}
+
+	taskMutex.Lock()
+	var task *Task
+	for _, t := range tasksQueue {
+		if t.ID == reqBody.ID {
+			task = t
+			break
+		}
+	}
+	if task == nil {
+		taskMutex.Unlock()
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+	task.Executed = true
+	task.Result = reqBody.Result
+	taskMutex.Unlock()
+
+	// Обновляем статус выражения
+	exprMutex.Lock()
+	if expr, ok := expressions[task.ExpressionID]; ok {
+		allDone := true
+		for _, t := range expr.Tasks {
+			if !t.Executed {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			expr.Result = reqBody.Result
+			expr.Status = "completed"
+		}
+	}
+	exprMutex.Unlock()
+
+	w.WriteHeader(http.StatusOK)
 }
+

@@ -1,29 +1,29 @@
 package main
 
 import (
-    "log"
-    "net/http"
+	"log"
+	"net/http"
 
-    "calc_service/internal/orchestration"
+	"calc_service/internal/orchestration"
 )
 
 func main() {
-    mux := http.NewServeMux()
+	http.HandleFunc("/api/v1/calculate", orchestration.CalculateHandler)
+	http.HandleFunc("/api/v1/expressions/", orchestration.GetExpressionByIDHandler) // для конкретного выражения
+	http.HandleFunc("/api/v1/expressions", orchestration.GetExpressionsHandler)
+	http.HandleFunc("/internal/task", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			orchestration.GetTaskHandler(w, r)
+		case http.MethodPost:
+			orchestration.PostTaskResultHandler(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
-    // API для клиентов
-    mux.HandleFunc("/api/v1/calculate", orchestration.AddExpressionHandler)
-    // Дополнительно можно добавить GET /api/v1/expressions и GET /api/v1/expressions/{id}
-    // Внутренние API для агентов
-    mux.HandleFunc("/internal/task", func(w http.ResponseWriter, r *http.Request) {
-        if r.Method == http.MethodGet {
-            orchestration.GetTaskHandler(w, r)
-        } else if r.Method == http.MethodPost {
-            orchestration.SubmitTaskHandler(w, r)
-        } else {
-            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-        }
-    })
-
-    log.Println("Orchestrator server started on :8080")
-    log.Fatal(http.ListenAndServe(":8080", mux))
+	port := "8080"
+	log.Printf("Оркестратор запущен на порту %s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
+
